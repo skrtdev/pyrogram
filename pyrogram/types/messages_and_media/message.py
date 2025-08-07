@@ -1291,7 +1291,9 @@ class Message(Object, Update):
                                 await client.resolve_peer(from_id),
                                 await client.resolve_peer(peer_id)
                             ]
-                        )
+                        ),
+                        retries=50,
+                        timeout=3
                     )
                 except PeerIdInvalid:
                     pass
