@@ -32,7 +32,7 @@ from importlib import import_module
 from io import StringIO, BytesIO
 from mimetypes import MimeTypes
 from pathlib import Path
-from typing import Union, List, Optional, Callable, AsyncGenerator, Type, Tuple
+from typing import Union, List, Optional, Callable, AsyncGenerator, Type
 
 import pyrogram
 from pyrogram import __version__, __license__
@@ -46,14 +46,14 @@ from pyrogram.errors import (
     VolumeLocNotFound, ChannelPrivate,
     BadRequest, AuthBytesInvalid,
     FloodWait, FloodPremiumWait,
-    ChannelInvalid, PersistentTimestampInvalid, PersistentTimestampOutdated
+    PersistentTimestampInvalid, PersistentTimestampOutdated
 )
 from pyrogram.handlers.handler import Handler
 from pyrogram.methods import Methods
 from pyrogram.session import Auth, Session
 from pyrogram.storage import Storage, FileStorage, MemoryStorage
 from pyrogram.types import User, TermsOfService, LinkPreviewOptions
-from pyrogram.utils import MIN_MONOFORUM_CHANNEL_ID, ainput
+from pyrogram.utils import ainput
 from pyrogram.qrlogin import QRLogin
 from .connection import Connection
 from .connection.transport import TCP, TCPAbridged
@@ -226,6 +226,10 @@ class Client(Methods):
             Pass True to automatically fetch stories if they are missing.
             Defaults to True.
             
+        fetch_stickers (``bool``, *optional*):
+            Pass True to automatically fetch names of sticker sets.
+            Defaults to True.
+
         fetch_stickers (``bool``, *optional*):
             Pass True to automatically fetch names of sticker sets.
             Defaults to True.
@@ -502,7 +506,7 @@ class Client(Methods):
                     print("Password hint: {}".format(await self.get_password_hint()))
 
                     if not self.password:
-                        self.password = await ainput("Enter password (empty to recover): ", hide=self.hide_password, loop=self.loop)
+                        self.password = await ainput("Enter 2FA password (empty to recover): ", hide=self.hide_password, loop=self.loop)
 
                     try:
                         if not self.password:
@@ -557,12 +561,30 @@ class Client(Methods):
 
         return signed_up
 
-    async def authorize_qr(self, except_ids: List[int] = []) -> User:
+    async def authorize_qr(self, except_ids: List[int] = []) -> "User":
         from qrcode import QRCode
+
         qr_login = QRLogin(self, except_ids)
+        await qr_login.recreate()
+
+        qr = QRCode(version=1)
+        signed_in = None
 
         while True:
             try:
+                print(
+                    "\x1b[2J\n"
+                    f"Welcome to Pyrogram (version {__version__})\n"
+                    "Pyrogram is free software and comes with ABSOLUTELY NO WARRANTY. Licensed\n"
+                    f"under the terms of the {__license__}.\n"
+                    "Scan the QR code below to login\n"
+                    "Settings -> Privacy and Security -> Active Sessions -> Scan QR Code.",
+                    flush=True
+                )
+
+                qr.clear()
+                qr.add_data(qr_login.url)
+                qr.print_ascii(tty=True)
                 log.info("Waiting for QR code being scanned.")
 
                 signed_in = await qr_login.wait()
@@ -573,21 +595,42 @@ class Client(Methods):
             except asyncio.TimeoutError:
                 log.info("Recreating QR code.")
                 await qr_login.recreate()
-                print("\x1b[2J")
-                print(f"Welcome to Pyrogram (version {__version__})")
-                print(f"Pyrogram is free software and comes with ABSOLUTELY NO WARRANTY. Licensed\n"
-                      f"under the terms of the {__license__}.\n")
-                print("Scan the QR code below to login")
-                print("Settings -> Privacy and Security -> Active Sessions -> Scan QR Code.\n")
+            except SessionPasswordNeeded as e:
+                print(e.MESSAGE)
 
-                qrcode = QRCode(version=1)
-                qrcode.add_data(qr_login.url)
-                qrcode.print_ascii(invert=True)
-            except SessionPasswordNeeded:
-                print(f"Password hint: {await self.get_password_hint()}")
-                return await self.check_password(
-                    await ainput("Enter 2FA password: ", hide=self.hide_password, loop=self.loop)
-                )
+                while True:
+                    print("Password hint: {}".format(await self.get_password_hint()))
+
+                    if not self.password:
+                        self.password = await ainput("Enter 2FA password (empty to recover): ", hide=self.hide_password, loop=self.loop)
+
+                    try:
+                        if not self.password:
+                            confirm = await ainput("Confirm password recovery (y/N): ", loop=self.loop)
+
+                            if confirm.lower() == "y":
+                                email_pattern = await self.send_recovery_code()
+                                print(f"The recovery code has been sent to {email_pattern}")
+
+                                while True:
+                                    recovery_code = await ainput("Enter recovery code: ", loop=self.loop)
+
+                                    try:
+                                        return await self.recover_password(recovery_code)
+                                    except BadRequest as e:
+                                        print(e.MESSAGE)
+                                    except Exception as e:
+                                        log.exception(e)
+                                        raise
+                            else:
+                                self.password = None
+                        else:
+                            return await self.check_password(self.password)
+                    except BadRequest as e:
+                        print(e.MESSAGE)
+                        self.password = None
+            else:
+                break
 
     def set_parse_mode(self, parse_mode: Optional["enums.ParseMode"]):
         """Set the parse mode to be used globally by the client.
@@ -780,146 +823,6 @@ class Client(Methods):
             self.dispatcher.updates_queue.put_nowait((updates.update, {}, {}))
         elif isinstance(updates, raw.types.UpdatesTooLong):
             log.info(updates)
-
-    async def recover_gaps(self) -> Tuple[int, int]:
-        if self.skip_updates:
-            log.info("Recover gaps disabled in client params. Skipping recovery")
-            return (0, 0)
-
-        states = await self.storage.update_state()
-
-        if not states:
-            log.info("No states found, skipping recovery")
-            return (0, 0)
-
-        message_updates_counter = 0
-        other_updates_counter = 0
-
-        log.info("Started gaps recovering...")
-
-        for local_state in states:
-            id, local_pts, local_qts, local_date, local_seq = local_state
-
-            prev_pts = 0
-
-            while True:
-                try:
-                    diff = await self.invoke(
-                        raw.functions.updates.GetChannelDifference(
-                            channel=await self.resolve_peer(id),
-                            filter=raw.types.ChannelMessagesFilterEmpty(),
-                            pts=local_pts,
-                            limit=10000,
-                            force=False
-                        ) if id < 0 or id > MIN_MONOFORUM_CHANNEL_ID else
-                        raw.functions.updates.GetDifference(
-                            pts=local_pts,
-                            date=local_date,
-                            qts=0
-                        )
-                    )
-                except (ChannelPrivate, ChannelInvalid, PersistentTimestampOutdated, PersistentTimestampInvalid):
-                    break
-
-                if isinstance(diff, raw.types.updates.DifferenceEmpty):
-                    await self.storage.update_state(
-                        (
-                            id,
-                            local_pts,
-                            None,
-                            diff.date,
-                            diff.seq
-                        )
-                    )
-                    break
-                elif isinstance(diff, raw.types.updates.DifferenceTooLong):
-                    await self.storage.update_state(
-                        (
-                            id,
-                            diff.pts,
-                            None,
-                            local_date,
-                            local_seq
-                        )
-                    )
-                    continue
-                elif isinstance(diff, raw.types.updates.Difference):
-                    local_pts = diff.state.pts
-                    local_date = diff.state.date
-                    local_seq = diff.state.seq
-                elif isinstance(diff, raw.types.updates.DifferenceSlice):
-                    local_pts = diff.intermediate_state.pts
-                    local_date = diff.intermediate_state.date
-                    local_seq = diff.intermediate_state.seq
-
-                    if prev_pts == local_pts:
-                        break
-
-                    prev_pts = local_pts
-                elif isinstance(diff, raw.types.updates.ChannelDifferenceEmpty):
-                    await self.storage.update_state(
-                        (
-                            id,
-                            diff.pts,
-                            None,
-                            local_date,
-                            local_seq
-                        )
-                    )
-                    break
-                elif isinstance(diff, raw.types.updates.ChannelDifferenceTooLong):
-                    await self.storage.update_state(
-                        (
-                            id,
-                            diff.dialog.pts,
-                            None,
-                            local_date,
-                            local_seq
-                        )
-                    )
-                    continue
-                elif isinstance(diff, raw.types.updates.ChannelDifference):
-                    local_pts = diff.pts
-
-                users = {i.id: i for i in diff.users}
-                chats = {i.id: i for i in diff.chats}
-
-                for message in diff.new_messages:
-                    message_updates_counter += 1
-                    self.dispatcher.updates_queue.put_nowait(
-                        (
-                            raw.types.UpdateNewMessage(
-                                message=message,
-                                pts=local_pts,
-                                pts_count=-1
-                            ),
-                            users,
-                            chats
-                        )
-                    )
-
-                for update in diff.other_updates:
-                    other_updates_counter += 1
-                    self.dispatcher.updates_queue.put_nowait(
-                        (update, users, chats)
-                    )
-
-                if isinstance(diff, (raw.types.updates.Difference, raw.types.updates.ChannelDifference)):
-                    break
-
-            await self.storage.update_state(
-                (
-                    id,
-                    local_pts,
-                    None,
-                    local_date,
-                    local_seq
-                )
-            )
-
-
-        log.info("Recovered %s messages and %s updates", message_updates_counter, other_updates_counter)
-        return (message_updates_counter, other_updates_counter)
 
     async def load_session(self):
         await self.storage.open()

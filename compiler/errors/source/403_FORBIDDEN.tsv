@@ -47,6 +47,7 @@ TAKEOUT_REQUIRED	The method must be invoked inside a [takeout](https://core.tele
 USER_BOT_INVALID	User accounts must provide the `bot` method parameter when calling this method. If there is no such method parameter, this method can only be invoked by bot accounts.
 USER_CHANNELS_TOO_MUCH	One of the users you tried to add is already in too many channels/supergroups.
 USER_DELETED	You can't send this secret message because the other participant deleted their account.
+USER_DISALLOWED_STARGIFTS	You can't send gifts to this user due to their privacy settings.
 USER_INVALID	The provided user is invalid.
 USER_IS_BLOCKED	You were blocked by this user.
 USER_NOT_MUTUAL_CONTACT	The provided user is not a mutual contact.

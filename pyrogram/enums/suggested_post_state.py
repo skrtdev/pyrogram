@@ -16,16 +16,19 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with Pyrogram.  If not, see <http://www.gnu.org/licenses/>.
 
-from .invoke import Invoke
-from .recover_gaps import RecoverGaps
-from .resolve_peer import ResolvePeer
-from .save_file import SaveFile
+from enum import auto
+
+from .auto_name import AutoName
 
 
-class Advanced(
-    Invoke,
-    RecoverGaps,
-    ResolvePeer,
-    SaveFile
-):
-    pass
+class SuggestedPostState(AutoName):
+    """Suggested post state enumeration used in :obj:`~pyrogram.types.SuggestedPostInfo`."""
+
+    PENDING = auto()
+    """The post must be approved or declined."""
+
+    APPROVED = auto()
+    """The post was approved"""
+
+    DECLINED = auto()
+    """The post was declined"""

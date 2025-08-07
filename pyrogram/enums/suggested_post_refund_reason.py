@@ -16,16 +16,16 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with Pyrogram.  If not, see <http://www.gnu.org/licenses/>.
 
-from .invoke import Invoke
-from .recover_gaps import RecoverGaps
-from .resolve_peer import ResolvePeer
-from .save_file import SaveFile
+from enum import auto
+
+from .auto_name import AutoName
 
 
-class Advanced(
-    Invoke,
-    RecoverGaps,
-    ResolvePeer,
-    SaveFile
-):
-    pass
+class SuggestedPostRefundReason(AutoName):
+    """Suggested post refund reason enumeration used in :obj:`~pyrogram.types.SuggestedPostRefunded`."""
+
+    POST_DELETED = auto()
+    """The post was refunded, because it was deleted by channel administrators."""
+
+    PAYMENT_REFUNDED = auto()
+    """The post was refunded, because the payment for the post was refunded."""
