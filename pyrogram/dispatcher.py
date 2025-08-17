@@ -263,6 +263,7 @@ class Dispatcher:
 
         if not self.client.no_updates:
             for i in range(self.client.workers):
+                self.client.loop.create_task(self.client.handle_updates_worker())
                 self.locks_list.append(asyncio.Lock())
 
                 self.handler_worker_tasks.append(

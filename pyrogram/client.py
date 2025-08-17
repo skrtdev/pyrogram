@@ -406,6 +406,7 @@ class Client(Methods):
         self.updates_watchdog_task = None
         self.updates_watchdog_event = asyncio.Event()
         self.last_update_time = datetime.now()
+        self.updates_queue = asyncio.Queue()
 
         if isinstance(loop, asyncio.AbstractEventLoop):
             self.loop = loop
@@ -823,6 +824,12 @@ class Client(Methods):
             self.dispatcher.updates_queue.put_nowait((updates.update, {}, {}))
         elif isinstance(updates, raw.types.UpdatesTooLong):
             log.info(updates)
+
+    async def handle_updates_worker(self):
+        while True:
+            updates = await self.updates_queue.get()
+            await self.handle_updates(updates)
+
 
     async def load_session(self):
         await self.storage.open()
