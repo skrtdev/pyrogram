@@ -105,7 +105,7 @@ class Session:
         self.recv_task = None
 
         self.is_started = asyncio.Event()
-        self.restart_event = asyncio.Event()
+        self.restart_lock = asyncio.Lock()
 
     async def start(self):
         while True:
@@ -155,7 +155,6 @@ class Session:
                 raise e
             except ConnectionError as e:
                 await self.stop()
-                # raise e
             except (OSError, RPCError):
                 await self.stop()
             except Exception as e:
@@ -192,8 +191,9 @@ class Session:
 
         self.ping_task_event.clear()
 
-        await self.connection.close()
-
+        if self.connection:
+            await self.connection.close()
+        
         if self.recv_task:
             try:
                 await self.recv_task
@@ -205,11 +205,11 @@ class Session:
         log.info("Session stopped")
 
     async def restart(self):
-        self.restart_event.set()
-        await self.stop()
-        await self.start()
-        self.restart_event.clear()
-
+        async with self.restart_lock:
+            if self.is_started.is_set():
+                await self.stop()
+            await self.start()
+    
     async def handle_packet(self, packet):
         try:
             data = await self.client.loop.run_in_executor(
@@ -222,7 +222,7 @@ class Session:
             )
         except ValueError as e:
             log.debug(e)
-            self.client.loop.create_task(self.restart())
+            await self.restart()
             return
 
         messages = (
@@ -318,8 +318,10 @@ class Session:
                     ), False
                 )
             except OSError:
-                self.client.loop.create_task(self.restart())
-                break
+                log.warning("Ping failed, restarting session...")
+                await self.restart()
+                continue
+            
             except RPCError:
                 pass
 
@@ -333,7 +335,9 @@ class Session:
                 packet = await asyncio.wait_for(self.connection.recv(), timeout=1)
             except asyncio.TimeoutError:
                 continue
-
+            except ConnectionError:
+                break
+            
             if packet is None or len(packet) == 4:
                 if packet:
                     error_code = -Int.read(BytesIO(packet))
@@ -348,12 +352,7 @@ class Session:
                         "Server sent transport error: %s (%s)",
                         error_code, Session.TRANSPORT_ERRORS.get(error_code, "unknown error")
                     )
-
-                if self.is_started.is_set():
-                    self.client.loop.create_task(self.restart())
-
-                break
-
+            
             self.client.loop.create_task(self.handle_packet(packet))
 
         log.info("NetworkTask stopped")
@@ -428,7 +427,7 @@ class Session:
 
         query_name = ".".join(inner_query.QUALNAME.split(".")[1:])
 
-        while True:
+        for attempt in range(1, retries + 1):
             try:
                 return await self.send(query, timeout=timeout)
             except (FloodWait, FloodPremiumWait) as e:
@@ -442,25 +441,15 @@ class Session:
 
                 await asyncio.sleep(amount)
             except (OSError, InternalServerError, ServiceUnavailable) as e:
-                if retries == 0:
+                if attempt >= retries:
                     raise e from None
 
-                (log.warning if retries < 2 else log.info)(
+                (log.warning if attempt >= retries - 1 else log.info)(
                     '[%s] Retrying "%s" due to: %s',
-                    Session.MAX_RETRIES - retries + 1,
+                    attempt,
                     query_name, str(e) or repr(e)
                 )
 
-                # restart was never being called after Exception block
-                if not self.restart_event.is_set():
-                    self.client.loop.create_task(self.restart())
-                else:
-                    # multiple Exceptions can be raised in a row, so we need to wait for the restart to finish
-                    try:
-                        await asyncio.wait_for(self.restart_event.wait(), self.WAIT_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        pass
-
-                await asyncio.sleep(0.5)
-
-                return await self.invoke(query, retries - 1, timeout)
+                await self.restart()
+        
+        raise TimeoutError(f'Failed to invoke "{query_name}" after {retries} retries')
